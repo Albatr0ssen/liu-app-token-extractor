@@ -1,66 +1,101 @@
-import os
-from pprint import pprint
-from sys import exit
+from rich.pretty import pprint
 import httpx
+import os
+from contextlib import asynccontextmanager
+import signal
+from typing import NamedTuple
+from urllib.parse import urlunparse, urlencode
+from fastapi import FastAPI
+import uvicorn
 
-from pydantic import BaseModel, EmailStr
-from argparse import ArgumentParser
-
-from dotenv import load_dotenv
-
-#
-#
-# url = "https://jsonplaceholder.typicode.com/users/1"
-#
-# response = httpx.get(url)
-# response.raise_for_status()
-#
-# user = User.model_validate(response.json())
-# print(repr(user))
-#
-#
+LIU_APP_VERSION = "4.3.2"
+USER_AGENT = "FxVersion/9.0.325.11113 OSVersion/Linux.6.1.124.android14.11.g8d713f9e8e7b.ab13202960.1.SMP.PREEMPT.Wed.Mar.12.13.40.07.UTC.2025 Liuapp.MobileAuth.MobileAuthApiClient.Generated.MobileAuth/1.0.0.0"
 
 
-class FormsAuthentication(BaseModel):
-    UserName: str
-    Password: str
-    Kmsi: str = "false"
-    AuthMethod: str = "FormsAuthentication"
+class UriComponents(NamedTuple):
+    scheme: str
+    netloc: str
+    url: str
+    path: str
+    query: str
+    fragment: str
 
 
-username = "samak519@ad.liu.se"
-
-_ = load_dotenv()
-
-# password = getpass.getpass(echo_char="*")
-password = os.getenv("pass")
-if password is None:
-    exit(1)
-
-
-headers = httpx.Headers({"Content-Type": "application/x-www-form-urlencoded"})
-
-params = httpx.QueryParams(
-    {
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    query_params = {
         "client_id": "Liuapp_student_oauth_client",
-        "redirect_uri": "http%3A%2F%2Flocalhost%2FauthCallback",
+        "redirect_uri": "http://localhost/authCallback",
         "response_type": "code",
-        "resource": "https%3A%2F%2Fwww.student.liu.se%2Fliuapp",
-        "client-request-id": "da4d0618-8cae-41a0-3750-0080030000fc",
+        "resource": "https://www.student.liu.se/liuapp",
     }
-)
 
-data = FormsAuthentication(UserName=username, Password=password)
+    url_string = urlunparse(
+        UriComponents(
+            scheme="https",
+            netloc="fs.liu.se",
+            query=urlencode(query_params),
+            path="",
+            url="/adfs/oauth2/authorize",
+            fragment="",
+        )
+    )
+    print(url_string)
+    yield
 
 
-res = httpx.post(
-    url="https://fs.liu.se/adfs/oauth2/authorize",
-    headers=headers,
-    data=data.model_dump(),
-    params=params,
-    follow_redirects=False,
-)
+app = FastAPI(lifespan=lifespan)
 
-print(res.url, res.status_code)
-print(res.headers)
-# print(res.text)
+
+@app.get("/authCallback")
+async def auth(
+    code: str,
+):
+    print(code)
+    access_token = get_access_token_from_fs_liu(code)
+    user_token = get_user_token_from_mobile_auth(access_token)
+    print(user_token)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app", host="127.0.0.1", port=80, reload=False, log_level="warning"
+    )
+
+
+def get_access_token_from_fs_liu(code: str) -> str:
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": "http://localhost/authCallback",
+        "client_id": "Liuapp_student_oauth_client",
+        "User-Agent": USER_AGENT,
+    }
+
+    res = httpx.post("https://fs.liu.se/adfs/oauth2/token/adfs/oauth2/token", data=data)
+    tokens = res.json()
+
+    return tokens["access_token"]
+
+
+def get_user_token_from_mobile_auth(access_token: str) -> str:
+    res = httpx.get(
+        "https://mobileauth.it.liu.se/OAuth/authorize",
+        # verify=False,
+        # proxy="http://localhost:8080",
+        params={
+            "deviceOsName": "Android",
+            "deviceModelName": "Pixel 7 Pro",
+            "deviceOsVersion": "16",
+            "clientVersion": LIU_APP_VERSION,
+        },
+        headers={
+            "User-Agent": USER_AGENT,
+            "Authorization": f"Bearer {access_token}",
+        },
+    )
+
+    tokens = res.json()
+    pprint(tokens)
+    return tokens["UserToken"]
